@@ -24,7 +24,8 @@ fn cli() -> clap::Command<'static> {
         .arg(
             clap::Arg::new("path")
                 .default_value(".")
-                .help("Path to scan"),
+                .multiple_values(true)
+                .help("Path to scan, may be repeated"),
         )
         .arg(
             clap::Arg::new("bytes")
@@ -66,6 +67,13 @@ fn cli() -> clap::Command<'static> {
                 .long("si")
                 .takes_value(false)
                 .help("Interpret things as powers of 10 instead of powers of 2"),
+        )
+        .arg(
+            clap::Arg::new("numeric-uid")
+                .short('U')
+                .long("numeric-uid")
+                .takes_value(false)
+                .help("Only print numeric UIDs (otherwise, will try to resolve to usernames)"),
         )
         .group(clap::ArgGroup::new("output").args(&[
             "bytes",
@@ -173,25 +181,35 @@ impl SizeFormatter {
 fn main() {
     let matches = cli().get_matches();
     let formatter = SizeFormatter::from_matches(&matches);
-    let mut by_user: HashMap<u32, u64> = HashMap::new();
-    let walker = walkdir::WalkDir::new(matches.value_of_t_or_exit::<std::path::PathBuf>("path"))
-        .follow_links(false);
-    for entry in walker {
-        if let Ok(metadata) = entry.and_then(|e| e.metadata()) {
-            if metadata.is_file() {
-                *by_user.entry(metadata.uid()).or_insert_with(|| 0) += metadata.size();
+    let paths = matches.values_of_t_or_exit::<std::path::PathBuf>("path");
+    let print_headers = paths.len() > 1;
+    for path in paths {
+        if print_headers {
+            println!("--- {:?}", path);
+        }
+        let mut by_user: HashMap<u32, u64> = HashMap::new();
+        let walker = walkdir::WalkDir::new(path).follow_links(false);
+        for entry in walker {
+            if let Ok(metadata) = entry.and_then(|e| e.metadata()) {
+                if metadata.is_file() {
+                    *by_user.entry(metadata.uid()).or_insert_with(|| 0) += metadata.size();
+                }
             }
         }
+        by_user
+            .into_iter()
+            .sorted_by_key(|&(_, v)| v)
+            .for_each(|(user_id, size)| {
+                let u = if matches.is_present("numeric-uid") {
+                    user_id.to_string()
+                } else {
+                    users::get_user_by_uid(user_id)
+                        .map(|u| u.name().to_string_lossy().into_owned())
+                        .unwrap_or_else(|| user_id.to_string())
+                };
+                println!("{}\t{}", formatter.wrap(size), u);
+            })
     }
-    by_user
-        .into_iter()
-        .sorted_by_key(|&(_, v)| v)
-        .for_each(|(user_id, size)| {
-            let u = users::get_user_by_uid(user_id)
-                .map(|u| u.name().to_string_lossy().into_owned())
-                .unwrap_or_else(|| user_id.to_string());
-            println!("{}\t{}", formatter.wrap(size), u);
-        })
 }
 
 #[cfg(test)]
